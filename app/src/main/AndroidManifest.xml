@@ -17,15 +17,15 @@
 
     <!-- Foreground Service -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_REMOTE_MESSAGING" />
 
-    <!-- Start gateway again after device reboot -->
+    <!-- Restart after reboot -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
-    <!-- Keep CPU available while reconnecting/working -->
+    <!-- Keep CPU available for persistent gateway connection -->
     <uses-permission android:name="android.permission.WAKE_LOCK" />
 
-    <!-- Android 13+ notification permission -->
+    <!-- Android 13+ notifications -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <application
@@ -39,28 +39,26 @@
         android:theme="@style/Theme.Sms"
         tools:targetApi="35">
 
-        <!-- Main Activity -->
         <activity
             android:name=".MainActivity"
             android:exported="true">
 
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
-
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
 
         </activity>
 
-        <!-- SMS Gateway Foreground Service -->
+        <!-- Persistent SMS Gateway -->
         <service
             android:name=".service.SmsGatewayService"
             android:enabled="true"
             android:exported="false"
             android:stopWithTask="false"
-            android:foregroundServiceType="dataSync" />
+            android:foregroundServiceType="remoteMessaging" />
 
-        <!-- SMS Sent / Delivered Status Receiver -->
+        <!-- SMS delivery status -->
         <receiver
             android:name=".core.SmsStatusReceiver"
             android:enabled="true"
@@ -73,7 +71,7 @@
 
         </receiver>
 
-        <!-- Restart gateway after phone reboot -->
+        <!-- Restart gateway after normal boot -->
         <receiver
             android:name=".service.BootReceiver"
             android:enabled="true"
@@ -81,7 +79,6 @@
 
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
-                <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED" />
                 <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
             </intent-filter>
 
