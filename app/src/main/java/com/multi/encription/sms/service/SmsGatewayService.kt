@@ -1,10 +1,15 @@
 package com.multi.encription.sms.service
 
-import android.app.*
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
+import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.os.Build
 import android.os.IBinder
+import android.os.PowerManager
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.multi.encription.sms.MainActivity
@@ -12,7 +17,14 @@ import com.multi.encription.sms.R
 import com.multi.encription.sms.api.SmsApiServer
 import com.multi.encription.sms.database.SmsDatabase
 import com.multi.encription.sms.utils.ConfigManager
-import kotlinx.coroutines.*
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import java.net.NetworkInterface
 import java.net.SocketException
 
@@ -24,42 +36,124 @@ class SmsGatewayService : Service() {
     private lateinit var configManager: ConfigManager
     private lateinit var database: SmsDatabase
 
+    private var wakeLock: PowerManager.WakeLock? = null
+
     private val serviceScope =
-        CoroutineScope(Dispatchers.Main + SupervisorJob())
+        CoroutineScope(
+            SupervisorJob() + Dispatchers.Main
+        )
+
+    private var cleanupJob: Job? = null
 
     companion object {
-        private const val TAG = "SmsGatewayService"
-        private const val NOTIFICATION_ID = 1001
-        private const val CHANNEL_ID = "sms_gateway_channel"
+
+        private const val TAG =
+            "SmsGatewayService"
+
+        private const val NOTIFICATION_ID =
+            1001
+
+        private const val CHANNEL_ID =
+            "sms_gateway_channel"
+
+        private const val WAKE_LOCK_TAG =
+            "SmsGateway::GatewayWakeLock"
 
         fun startService(context: Context) {
-            val intent =
-                Intent(context, SmsGatewayService::class.java)
 
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                context.startForegroundService(intent)
-            } else {
-                context.startService(intent)
+            val intent =
+                Intent(
+                    context,
+                    SmsGatewayService::class.java
+                )
+
+            try {
+
+                if (
+                    Build.VERSION.SDK_INT >=
+                    Build.VERSION_CODES.O
+                ) {
+
+                    context.startForegroundService(
+                        intent
+                    )
+
+                } else {
+
+                    context.startService(
+                        intent
+                    )
+                }
+
+            } catch (e: Exception) {
+
+                Log.e(
+                    TAG,
+                    "Unable to start SMS Gateway service",
+                    e
+                )
             }
         }
 
         fun stopService(context: Context) {
-            val intent =
-                Intent(context, SmsGatewayService::class.java)
 
-            context.stopService(intent)
+            try {
+
+                context.stopService(
+                    Intent(
+                        context,
+                        SmsGatewayService::class.java
+                    )
+                )
+
+            } catch (e: Exception) {
+
+                Log.e(
+                    TAG,
+                    "Unable to stop SMS Gateway service",
+                    e
+                )
+            }
         }
     }
 
+    // =====================================================
+    // SERVICE LIFECYCLE
+    // =====================================================
+
     override fun onCreate() {
+
         super.onCreate()
 
-        configManager = ConfigManager(this)
-        database = SmsDatabase.getDatabase(this)
+        Log.i(
+            TAG,
+            "Creating SMS Gateway foreground service"
+        )
+
+        configManager =
+            ConfigManager(this)
+
+        database =
+            SmsDatabase.getDatabase(this)
 
         createNotificationChannel()
 
-        Log.d(TAG, "SMS Gateway Service created")
+        /*
+         * Enter foreground state immediately.
+         */
+        startForeground(
+            NOTIFICATION_ID,
+            createNotification(
+                "SMS Gateway starting..."
+            )
+        )
+
+        acquireWakeLock()
+
+        Log.i(
+            TAG,
+            "SMS Gateway Service created"
+        )
     }
 
     override fun onStartCommand(
@@ -68,70 +162,237 @@ class SmsGatewayService : Service() {
         startId: Int
     ): Int {
 
-        Log.d(TAG, "SMS Gateway Service starting")
+        Log.i(
+            TAG,
+            "SMS Gateway Service start requested"
+        )
 
         /*
-         * Android requires a foreground service to display its
-         * notification promptly after startForegroundService().
+         * Calling this again is safe and helps ensure
+         * the service remains a foreground service
+         * when Android recreates it.
          */
         startForeground(
             NOTIFICATION_ID,
-            createNotification("SMS Gateway starting...")
+            createNotification(
+                "SMS Gateway active"
+            )
         )
 
-        // Existing local HTTP API server
-        if (configManager.isServerEnabled) {
-            startApiServer()
-        }
+        startConfiguredComponents()
 
-        // New direct connection to Deplexo backend
-        startGatewayWebSocket()
-
-        // Existing database cleanup
         startCleanupTask()
 
         updateServiceNotification()
 
+        /*
+         * Ask Android to recreate this service if its
+         * process is killed for system resource reasons.
+         */
         return START_STICKY
+    }
+
+    override fun onTaskRemoved(
+        rootIntent: Intent?
+    ) {
+
+        /*
+         * User swiping the Activity from Recents should
+         * not intentionally stop the gateway.
+         *
+         * The foreground service remains responsible
+         * for the persistent WebSocket connection.
+         */
+        Log.w(
+            TAG,
+            "App removed from Recents; gateway service remains active"
+        )
+
+        updateServiceNotification()
+
+        super.onTaskRemoved(
+            rootIntent
+        )
     }
 
     override fun onDestroy() {
 
-        Log.d(TAG, "SMS Gateway Service destroying")
+        Log.w(
+            TAG,
+            "SMS Gateway Service destroying"
+        )
 
         stopGatewayWebSocket()
+
         stopApiServer()
+
+        cleanupJob?.cancel()
+        cleanupJob = null
+
+        releaseWakeLock()
 
         serviceScope.cancel()
 
         super.onDestroy()
 
-        Log.d(TAG, "SMS Gateway Service destroyed")
+        Log.w(
+            TAG,
+            "SMS Gateway Service destroyed"
+        )
     }
 
-    override fun onBind(intent: Intent?): IBinder? = null
+    override fun onBind(
+        intent: Intent?
+    ): IBinder? = null
 
-    // ----------------------------------------------------
-    // DIRECT BACKEND CONNECTION
-    // ----------------------------------------------------
+    // =====================================================
+    // START CONFIGURED COMPONENTS
+    // =====================================================
+
+    private fun startConfiguredComponents() {
+
+        if (
+            configManager.isServerEnabled
+        ) {
+
+            startApiServer()
+
+        } else {
+
+            /*
+             * If configuration changed while the service
+             * was alive, make sure an old local server
+             * is not left running.
+             */
+            stopApiServer()
+        }
+
+        if (
+            configManager.isWebSocketEnabled &&
+            configManager.hasValidWebSocketConfig()
+        ) {
+
+            startGatewayWebSocket()
+
+        } else {
+
+            stopGatewayWebSocket()
+        }
+    }
+
+    // =====================================================
+    // WAKE LOCK
+    // =====================================================
+
+    private fun acquireWakeLock() {
+
+        try {
+
+            if (
+                wakeLock?.isHeld == true
+            ) {
+                return
+            }
+
+            val powerManager =
+                getSystemService(
+                    Context.POWER_SERVICE
+                ) as PowerManager
+
+            wakeLock =
+                powerManager.newWakeLock(
+                    PowerManager.PARTIAL_WAKE_LOCK,
+                    WAKE_LOCK_TAG
+                ).apply {
+
+                    setReferenceCounted(false)
+
+                    acquire()
+                }
+
+            Log.i(
+                TAG,
+                "Gateway wake lock acquired"
+            )
+
+        } catch (e: Exception) {
+
+            Log.e(
+                TAG,
+                "Unable to acquire gateway wake lock",
+                e
+            )
+        }
+    }
+
+    private fun releaseWakeLock() {
+
+        try {
+
+            if (
+                wakeLock?.isHeld == true
+            ) {
+
+                wakeLock?.release()
+            }
+
+        } catch (e: Exception) {
+
+            Log.e(
+                TAG,
+                "Unable to release gateway wake lock",
+                e
+            )
+
+        } finally {
+
+            wakeLock = null
+        }
+    }
+
+    // =====================================================
+    // DIRECT BACKEND WEBSOCKET
+    // =====================================================
 
     private fun startGatewayWebSocket() {
 
-        if (!configManager.isWebSocketEnabled) {
-            Log.d(TAG, "WebSocket gateway is disabled")
+        if (
+            !configManager.isWebSocketEnabled
+        ) {
+
+            Log.d(
+                TAG,
+                "Direct gateway disabled"
+            )
+
             return
         }
 
-        if (!configManager.hasValidWebSocketConfig()) {
-            Log.w(TAG, "WebSocket configuration is incomplete")
+        if (
+            !configManager.hasValidWebSocketConfig()
+        ) {
+
+            Log.w(
+                TAG,
+                "Direct gateway configuration incomplete"
+            )
+
             updateNotification(
                 "Direct gateway configuration required"
             )
+
             return
         }
 
-        if (gatewayWebSocketClient != null) {
-            Log.d(TAG, "WebSocket client already initialized")
+        if (
+            gatewayWebSocketClient != null
+        ) {
+
+            Log.d(
+                TAG,
+                "WebSocket client already initialized"
+            )
+
             return
         }
 
@@ -139,31 +400,38 @@ class SmsGatewayService : Service() {
 
             Log.i(
                 TAG,
-                "Starting direct backend connection"
+                "Starting direct OTP backend connection"
             )
 
             gatewayWebSocketClient =
                 GatewayWebSocketClient(
-                    context = applicationContext,
-                    serverUrl = configManager.webSocketUrl,
-                    gatewayToken = configManager.gatewayToken
+                    context =
+                        applicationContext,
+
+                    serverUrl =
+                        configManager.webSocketUrl,
+
+                    gatewayToken =
+                        configManager.gatewayToken
                 )
 
-            gatewayWebSocketClient?.connect()
+            gatewayWebSocketClient
+                ?.connect()
 
             updateNotification(
-                "Connecting directly to OTP backend..."
+                "Connecting to OTP backend..."
             )
 
         } catch (e: Exception) {
 
             Log.e(
                 TAG,
-                "Unable to start WebSocket gateway",
+                "Unable to start direct backend connection",
                 e
             )
 
-            gatewayWebSocketClient = null
+            gatewayWebSocketClient =
+                null
 
             updateNotification(
                 "Backend connection failed"
@@ -175,13 +443,8 @@ class SmsGatewayService : Service() {
 
         try {
 
-            gatewayWebSocketClient?.disconnect()
-            gatewayWebSocketClient = null
-
-            Log.i(
-                TAG,
-                "Direct backend connection stopped"
-            )
+            gatewayWebSocketClient
+                ?.disconnect()
 
         } catch (e: Exception) {
 
@@ -190,6 +453,11 @@ class SmsGatewayService : Service() {
                 "Unable to stop WebSocket gateway",
                 e
             )
+
+        } finally {
+
+            gatewayWebSocketClient =
+                null
         }
     }
 
@@ -199,24 +467,39 @@ class SmsGatewayService : Service() {
 
             stopGatewayWebSocket()
 
-            delay(1000)
+            delay(
+                1000
+            )
 
-            startGatewayWebSocket()
+            if (
+                configManager.isWebSocketEnabled &&
+                configManager.hasValidWebSocketConfig()
+            ) {
+
+                startGatewayWebSocket()
+            }
 
             updateServiceNotification()
         }
     }
 
-    // ----------------------------------------------------
-    // EXISTING LOCAL HTTP API SERVER
-    // ----------------------------------------------------
+    // =====================================================
+    // LOCAL HTTP API SERVER
+    // =====================================================
 
     private fun startApiServer() {
 
         try {
 
-            if (apiServer?.isAlive == true) {
-                Log.d(TAG, "API Server already running")
+            if (
+                apiServer?.isAlive == true
+            ) {
+
+                Log.d(
+                    TAG,
+                    "API Server already running"
+                )
+
                 return
             }
 
@@ -227,13 +510,17 @@ class SmsGatewayService : Service() {
                 )
 
             val started =
-                apiServer?.startServer() ?: false
+                apiServer
+                    ?.startServer()
+                    ?: false
 
-            if (started) {
+            if (
+                started
+            ) {
 
                 Log.i(
                     TAG,
-                    "API Server started successfully on port ${configManager.serverPort}"
+                    "API Server started on port ${configManager.serverPort}"
                 )
 
                 logServerUrls()
@@ -266,10 +553,8 @@ class SmsGatewayService : Service() {
 
         try {
 
-            apiServer?.stopServer()
-            apiServer = null
-
-            Log.i(TAG, "API Server stopped")
+            apiServer
+                ?.stopServer()
 
         } catch (e: Exception) {
 
@@ -278,6 +563,11 @@ class SmsGatewayService : Service() {
                 "Error stopping API Server",
                 e
             )
+
+        } finally {
+
+            apiServer =
+                null
         }
     }
 
@@ -287,9 +577,14 @@ class SmsGatewayService : Service() {
 
             stopApiServer()
 
-            delay(1000)
+            delay(
+                1000
+            )
 
-            if (configManager.isServerEnabled) {
+            if (
+                configManager.isServerEnabled
+            ) {
+
                 startApiServer()
             }
 
@@ -297,29 +592,39 @@ class SmsGatewayService : Service() {
         }
     }
 
-    // ----------------------------------------------------
+    // =====================================================
     // SERVER URL LOGGING
-    // ----------------------------------------------------
+    // =====================================================
 
     private fun logServerUrls() {
 
         try {
 
-            val port = configManager.serverPort
-            val interfaces =
-                NetworkInterface.getNetworkInterfaces()
+            val port =
+                configManager.serverPort
 
-            Log.i(TAG, "SMS Gateway API Server URLs:")
+            val interfaces =
+                NetworkInterface
+                    .getNetworkInterfaces()
+
+            Log.i(
+                TAG,
+                "SMS Gateway API Server URLs:"
+            )
+
             Log.i(
                 TAG,
                 "- Local: http://localhost:$port/api/info"
             )
+
             Log.i(
                 TAG,
                 "- Local: http://127.0.0.1:$port/api/info"
             )
 
-            while (interfaces.hasMoreElements()) {
+            while (
+                interfaces.hasMoreElements()
+            ) {
 
                 val networkInterface =
                     interfaces.nextElement()
@@ -330,9 +635,12 @@ class SmsGatewayService : Service() {
                 ) {
 
                     val addresses =
-                        networkInterface.inetAddresses
+                        networkInterface
+                            .inetAddresses
 
-                    while (addresses.hasMoreElements()) {
+                    while (
+                        addresses.hasMoreElements()
+                    ) {
 
                         val address =
                             addresses.nextElement()
@@ -362,81 +670,103 @@ class SmsGatewayService : Service() {
         }
     }
 
-    // ----------------------------------------------------
+    // =====================================================
     // DATABASE CLEANUP
-    // ----------------------------------------------------
+    // =====================================================
 
     private fun startCleanupTask() {
 
-        if (!configManager.isAutoDeleteOldSmsEnabled) {
+        if (
+            !configManager.isAutoDeleteOldSmsEnabled
+        ) {
             return
         }
 
-        serviceScope.launch {
+        /*
+         * Avoid starting another 24-hour loop every time
+         * Android calls onStartCommand().
+         */
+        if (
+            cleanupJob?.isActive == true
+        ) {
+            return
+        }
 
-            while (isActive) {
+        cleanupJob =
+            serviceScope.launch {
 
-                try {
+                while (
+                    isActive
+                ) {
 
-                    val cutoffTime =
-                        System.currentTimeMillis() -
-                            (
-                                configManager.autoDeleteDays *
-                                    24L *
-                                    60L *
-                                    60L *
-                                    1000L
-                                )
+                    try {
 
-                    val deletedCount =
-                        database.smsDao().run {
+                        val cutoffTime =
+                            System.currentTimeMillis() -
+                                (
+                                    configManager.autoDeleteDays *
+                                        24L *
+                                        60L *
+                                        60L *
+                                        1000L
+                                    )
 
-                            val oldSmsCount =
-                                getSmsCountSince(
-                                    cutoffTime
-                                )
+                        val deletedCount =
+                            database
+                                .smsDao()
+                                .run {
 
-                            deleteOldSms(
-                                cutoffTime
+                                    val oldSmsCount =
+                                        getSmsCountSince(
+                                            cutoffTime
+                                        )
+
+                                    deleteOldSms(
+                                        cutoffTime
+                                    )
+
+                                    oldSmsCount
+                                }
+
+                        if (
+                            deletedCount > 0
+                        ) {
+
+                            Log.d(
+                                TAG,
+                                "Cleaned up $deletedCount old SMS records"
                             )
-
-                            oldSmsCount
                         }
 
-                    if (deletedCount > 0) {
+                    } catch (e: Exception) {
 
-                        Log.d(
+                        Log.e(
                             TAG,
-                            "Cleaned up $deletedCount old SMS records"
+                            "Error during cleanup task",
+                            e
                         )
                     }
 
-                } catch (e: Exception) {
-
-                    Log.e(
-                        TAG,
-                        "Error during cleanup task",
-                        e
+                    delay(
+                        24L *
+                            60L *
+                            60L *
+                            1000L
                     )
                 }
-
-                delay(
-                    24L *
-                        60L *
-                        60L *
-                        1000L
-                )
             }
-        }
     }
 
-    // ----------------------------------------------------
-    // NOTIFICATIONS
-    // ----------------------------------------------------
+    // =====================================================
+    // NOTIFICATION
+    // =====================================================
 
     private fun createNotificationChannel() {
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+        if (
+            Build.VERSION.SDK_INT >=
+            Build.VERSION_CODES.O
+        ) {
 
             val channel =
                 NotificationChannel(
@@ -446,9 +776,11 @@ class SmsGatewayService : Service() {
                 ).apply {
 
                     description =
-                        "SMS Gateway background service"
+                        "Keeps the SMS OTP gateway connected to the backend"
 
-                    setShowBadge(false)
+                    setShowBadge(
+                        false
+                    )
                 }
 
             val notificationManager =
@@ -465,20 +797,25 @@ class SmsGatewayService : Service() {
 
     private fun createNotification(
         message: String =
-            "SMS Gateway Service running"
+            "SMS Gateway running"
     ): Notification {
 
-        val intent =
+        val openAppIntent =
             Intent(
                 this,
                 MainActivity::class.java
-            )
+            ).apply {
+
+                flags =
+                    Intent.FLAG_ACTIVITY_CLEAR_TOP or
+                    Intent.FLAG_ACTIVITY_SINGLE_TOP
+            }
 
         val pendingIntent =
             PendingIntent.getActivity(
                 this,
                 0,
-                intent,
+                openAppIntent,
                 PendingIntent.FLAG_UPDATE_CURRENT or
                     PendingIntent.FLAG_IMMUTABLE
             )
@@ -500,8 +837,21 @@ class SmsGatewayService : Service() {
             .setContentIntent(
                 pendingIntent
             )
-            .setOngoing(true)
-            .setAutoCancel(false)
+            .setOngoing(
+                true
+            )
+            .setAutoCancel(
+                false
+            )
+            .setOnlyAlertOnce(
+                true
+            )
+            .setCategory(
+                NotificationCompat.CATEGORY_SERVICE
+            )
+            .setPriority(
+                NotificationCompat.PRIORITY_LOW
+            )
             .build()
     }
 
@@ -509,13 +859,12 @@ class SmsGatewayService : Service() {
         message: String
     ) {
 
-        if (!configManager.isNotificationEnabled) {
-            return
-        }
-
-        val notification =
-            createNotification(message)
-
+        /*
+         * The foreground service itself must keep its
+         * notification available. We therefore update
+         * the existing foreground notification rather
+         * than stopping foreground mode.
+         */
         val notificationManager =
             getSystemService(
                 Context.NOTIFICATION_SERVICE
@@ -523,7 +872,9 @@ class SmsGatewayService : Service() {
 
         notificationManager.notify(
             NOTIFICATION_ID,
-            notification
+            createNotification(
+                message
+            )
         )
     }
 
@@ -538,30 +889,39 @@ class SmsGatewayService : Service() {
 
         val message =
             when {
+
                 directGatewayEnabled &&
                     localServerRunning ->
+
                     "Direct backend + local API active"
 
                 directGatewayEnabled ->
+
                     "Direct OTP gateway active"
 
                 localServerRunning ->
-                    "API Server running on port ${configManager.serverPort}"
+
+                    "Local API running on port ${configManager.serverPort}"
 
                 else ->
-                    "SMS Gateway Service running"
+
+                    "SMS Gateway service active"
             }
 
-        updateNotification(message)
+        updateNotification(
+            message
+        )
     }
 
-    // ----------------------------------------------------
+    // =====================================================
     // STATUS
-    // ----------------------------------------------------
+    // =====================================================
 
-    fun getServerStatus(): Map<String, Any> {
+    fun getServerStatus():
+        Map<String, Any> {
 
         return mapOf(
+
             "server_running" to
                 (apiServer?.isAlive == true),
 
