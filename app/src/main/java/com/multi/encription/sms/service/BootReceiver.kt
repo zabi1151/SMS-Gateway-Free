@@ -12,54 +12,66 @@ class BootReceiver : BroadcastReceiver() {
         private const val TAG = "BootReceiver"
     }
 
-    override fun onReceive(context: Context, intent: Intent) {
+    override fun onReceive(
+        context: Context,
+        intent: Intent
+    ) {
 
         val action = intent.action
 
-        Log.i(TAG, "Received system event: $action")
+        Log.i(
+            TAG,
+            "System event received: $action"
+        )
 
         if (
-            action == Intent.ACTION_BOOT_COMPLETED ||
-            action == Intent.ACTION_LOCKED_BOOT_COMPLETED ||
-            action == Intent.ACTION_MY_PACKAGE_REPLACED
+            action != Intent.ACTION_BOOT_COMPLETED &&
+            action != Intent.ACTION_MY_PACKAGE_REPLACED
         ) {
+            return
+        }
 
-            val configManager = ConfigManager(context)
+        try {
 
-            val shouldStartService =
-                configManager.isServerEnabled ||
-                (
-                    configManager.isWebSocketEnabled &&
+            val configManager =
+                ConfigManager(context.applicationContext)
+
+            val directGatewayReady =
+                configManager.isWebSocketEnabled &&
                     configManager.hasValidWebSocketConfig()
-                )
 
-            if (shouldStartService) {
+            val localServerEnabled =
+                configManager.isServerEnabled
 
-                try {
-
-                    Log.i(
-                        TAG,
-                        "Starting SMS Gateway service"
-                    )
-
-                    SmsGatewayService.startService(context)
-
-                } catch (e: Exception) {
-
-                    Log.e(
-                        TAG,
-                        "Unable to start SMS Gateway service",
-                        e
-                    )
-                }
-
-            } else {
+            if (
+                !directGatewayReady &&
+                !localServerEnabled
+            ) {
 
                 Log.i(
                     TAG,
-                    "Gateway is disabled, service will not start"
+                    "Gateway disabled or not configured; service not started"
                 )
+
+                return
             }
+
+            Log.i(
+                TAG,
+                "Starting SMS Gateway after boot/package update"
+            )
+
+            SmsGatewayService.startService(
+                context.applicationContext
+            )
+
+        } catch (e: Exception) {
+
+            Log.e(
+                TAG,
+                "Failed to start SMS Gateway after boot",
+                e
+            )
         }
     }
 }
