@@ -27,10 +27,12 @@ android {
             )
         }
     }
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_11
         targetCompatibility = JavaVersion.VERSION_11
     }
+
     kotlinOptions {
         jvmTarget = "11"
     }
@@ -38,6 +40,7 @@ android {
 
 dependencies {
 
+    // Android core
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.appcompat)
     implementation(libs.material)
@@ -49,11 +52,16 @@ dependencies {
     implementation("androidx.room:room-ktx:2.6.1")
     kapt("androidx.room:room-compiler:2.6.1")
 
-    // HTTP Server
+    // Local HTTP Server
     implementation("org.nanohttpd:nanohttpd:2.3.1")
 
     // JSON handling
     implementation("com.google.code.gson:gson:2.10.1")
+
+    // WebSocket / HTTP client
+    // Used to keep the Android SMS Gateway connected directly
+    // with our Deplexo backend without Termux.
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
 
     // Coroutines
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
@@ -68,7 +76,10 @@ dependencies {
     // Permissions
     implementation("androidx.activity:activity-ktx:1.8.2")
 
+    // Unit tests
     testImplementation(libs.junit)
+
+    // Android tests
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
 }
