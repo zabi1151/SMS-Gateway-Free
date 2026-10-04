@@ -3,6 +3,7 @@ package com.multi.encription.sms
 import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Bundle
+import android.text.InputType
 import android.widget.*
 import androidx.activity.enableEdgeToEdge
 import androidx.appcompat.app.AlertDialog
@@ -29,7 +30,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var database: SmsDatabase
     private lateinit var smsHistoryAdapter: SmsHistoryAdapter
 
-    // UI Components
+    // Existing UI components
     private lateinit var serverStatusText: TextView
     private lateinit var serverToggle: SwitchMaterial
     private lateinit var apiKeyText: TextView
@@ -40,117 +41,297 @@ class MainActivity : AppCompatActivity() {
     private lateinit var smsHistoryRecyclerView: RecyclerView
     private lateinit var sendSmsFab: FloatingActionButton
 
+    companion object {
+        private const val DEFAULT_WEBSOCKET_URL =
+            "wss://sms-otp-backend.de.deplexo.com/gateway"
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
         enableEdgeToEdge()
+
         setContentView(R.layout.activity_main)
 
-        ViewCompat.setOnApplyWindowInsetsListener(findViewById(R.id.main)) { v, insets ->
-            val systemBars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
-            v.setPadding(systemBars.left, systemBars.top, systemBars.right, systemBars.bottom)
+        ViewCompat.setOnApplyWindowInsetsListener(
+            findViewById(R.id.main)
+        ) { view, insets ->
+
+            val systemBars =
+                insets.getInsets(
+                    WindowInsetsCompat.Type.systemBars()
+                )
+
+            view.setPadding(
+                systemBars.left,
+                systemBars.top,
+                systemBars.right,
+                systemBars.bottom
+            )
+
             insets
         }
 
         initializeComponents()
+
         setupUI()
+
         checkPermissions()
+
+        /*
+         * If Direct Backend was previously enabled,
+         * make sure foreground gateway service starts
+         * when the user opens the app.
+         */
+        if (
+            configManager.isWebSocketEnabled &&
+            configManager.hasValidWebSocketConfig()
+        ) {
+            SmsGatewayService.startService(this)
+        }
     }
+
+    // =====================================================
+    // INITIALIZATION
+    // =====================================================
 
     private fun initializeComponents() {
-        configManager = ConfigManager(this)
-        smsManager = SmsManager(this)
-        database = SmsDatabase.getDatabase(this)
 
-        // Initialize UI components
-        serverStatusText = findViewById(R.id.serverStatusText)
-        serverToggle = findViewById(R.id.serverToggle)
-        apiKeyText = findViewById(R.id.apiKeyText)
-        portText = findViewById(R.id.portText)
-        apiUrlsText = findViewById(R.id.apiUrlsText)
-        testApiButton = findViewById(R.id.testApiButton)
-        externalDomainButton = findViewById(R.id.externalDomainButton)
-        smsHistoryRecyclerView = findViewById(R.id.smsHistoryRecyclerView)
-        sendSmsFab = findViewById(R.id.sendSmsFab)
+        configManager =
+            ConfigManager(this)
+
+        smsManager =
+            SmsManager(this)
+
+        database =
+            SmsDatabase.getDatabase(this)
+
+        serverStatusText =
+            findViewById(
+                R.id.serverStatusText
+            )
+
+        serverToggle =
+            findViewById(
+                R.id.serverToggle
+            )
+
+        apiKeyText =
+            findViewById(
+                R.id.apiKeyText
+            )
+
+        portText =
+            findViewById(
+                R.id.portText
+            )
+
+        apiUrlsText =
+            findViewById(
+                R.id.apiUrlsText
+            )
+
+        testApiButton =
+            findViewById(
+                R.id.testApiButton
+            )
+
+        externalDomainButton =
+            findViewById(
+                R.id.externalDomainButton
+            )
+
+        smsHistoryRecyclerView =
+            findViewById(
+                R.id.smsHistoryRecyclerView
+            )
+
+        sendSmsFab =
+            findViewById(
+                R.id.sendSmsFab
+            )
     }
 
+    // =====================================================
+    // UI SETUP
+    // =====================================================
+
     private fun setupUI() {
-        // Setup RecyclerView
-        smsHistoryAdapter = SmsHistoryAdapter { sms ->
-            // Handle SMS item click - show details
-            showSmsDetails(sms)
-        }
 
-        smsHistoryRecyclerView.apply {
-            layoutManager = LinearLayoutManager(this@MainActivity)
-            adapter = smsHistoryAdapter
-        }
+        setupSmsHistory()
 
-        // Observe SMS history
-        database.smsDao().getAllSmsLiveData().observe(this) { smsList ->
-            smsHistoryAdapter.submitList(smsList)
-        }
+        setupServerToggle()
 
-        // Setup server toggle
-        serverToggle.isChecked = configManager.isServerEnabled
-        serverToggle.setOnCheckedChangeListener { _, isChecked ->
-            configManager.isServerEnabled = isChecked
-            if (isChecked) {
-                SmsGatewayService.startService(this)
-            } else {
-                SmsGatewayService.stopService(this)
-            }
-            updateServerStatus()
-            updateApiUrls()
-        }
-
-        // Setup FAB for sending SMS
         sendSmsFab.setOnClickListener {
             showSendSmsDialog()
         }
 
-        // Setup API key display
         updateApiKeyDisplay()
-
-        // Setup port display
         updatePortDisplay()
 
-        // Setup click listeners for configuration
-        apiKeyText.setOnClickListener { showApiKeyDialog() }
-        portText.setOnClickListener { showPortDialog() }
-        apiUrlsText.setOnClickListener { showApiUrlsDialog() }
+        apiKeyText.setOnClickListener {
+            showApiKeyDialog()
+        }
 
-        // Setup test API button
-        testApiButton.setOnClickListener { showTestApiDialog() }
+        portText.setOnClickListener {
+            showPortDialog()
+        }
 
-        // Setup external domain button
-        externalDomainButton.setOnClickListener { showExternalDomainDialog() }
+        apiUrlsText.setOnClickListener {
+            showApiUrlsDialog()
+        }
 
-        // Update displays
+        testApiButton.setOnClickListener {
+            showTestApiDialog()
+        }
+
+        /*
+         * We reuse the existing External Domain button
+         * for the new Termux-free Direct Backend setup.
+         */
+        externalDomainButton.setOnClickListener {
+            showDirectBackendDialog()
+        }
+
         updateServerStatus()
         updateApiUrls()
-        updateExternalDomainButton()
+        updateDirectBackendButton()
     }
 
+    private fun setupSmsHistory() {
+
+        smsHistoryAdapter =
+            SmsHistoryAdapter { sms ->
+
+                showSmsDetails(sms)
+            }
+
+        smsHistoryRecyclerView.apply {
+
+            layoutManager =
+                LinearLayoutManager(
+                    this@MainActivity
+                )
+
+            adapter =
+                smsHistoryAdapter
+        }
+
+        database
+            .smsDao()
+            .getAllSmsLiveData()
+            .observe(this) { smsList ->
+
+                smsHistoryAdapter
+                    .submitList(
+                        smsList
+                    )
+            }
+    }
+
+    // =====================================================
+    // LOCAL API SERVER TOGGLE
+    // =====================================================
+
+    private fun setupServerToggle() {
+
+        serverToggle.isChecked =
+            configManager.isServerEnabled
+
+        serverToggle
+            .setOnCheckedChangeListener { _, isChecked ->
+
+                configManager.isServerEnabled =
+                    isChecked
+
+                /*
+                 * Important:
+                 *
+                 * Local HTTP API and Direct Backend
+                 * connection are independent.
+                 *
+                 * Turning Local API OFF must NOT stop
+                 * the foreground service when WebSocket
+                 * mode is enabled.
+                 */
+                if (
+                    isChecked ||
+                    configManager.isWebSocketEnabled
+                ) {
+
+                    restartGatewayService()
+
+                } else {
+
+                    SmsGatewayService
+                        .stopService(this)
+                }
+
+                updateServerStatus()
+                updateApiUrls()
+            }
+    }
+
+    // =====================================================
+    // PERMISSIONS
+    // =====================================================
+
     private fun checkPermissions() {
-        if (!PermissionHelper.hasSmsPermissions(this)) {
-            if (PermissionHelper.shouldShowSmsPermissionRationale(this)) {
+
+        if (
+            !PermissionHelper
+                .hasSmsPermissions(this)
+        ) {
+
+            if (
+                PermissionHelper
+                    .shouldShowSmsPermissionRationale(
+                        this
+                    )
+            ) {
+
                 showPermissionRationaleDialog()
+
             } else {
-                PermissionHelper.requestSmsPermissions(this)
+
+                PermissionHelper
+                    .requestSmsPermissions(
+                        this
+                    )
             }
         }
     }
 
     private fun showPermissionRationaleDialog() {
-        AlertDialog.Builder(this)
-            .setTitle("SMS Permissions Required")
-            .setMessage("This app needs SMS permissions to send messages through the device. Please grant the permissions to continue.")
-            .setPositiveButton("Grant Permissions") { _, _ ->
-                PermissionHelper.requestSmsPermissions(this)
+
+        AlertDialog
+            .Builder(this)
+            .setTitle(
+                "SMS Permissions Required"
+            )
+            .setMessage(
+                "This app needs SMS permissions to send messages through the device. Please grant the permissions to continue."
+            )
+            .setPositiveButton(
+                "Grant Permissions"
+            ) { _, _ ->
+
+                PermissionHelper
+                    .requestSmsPermissions(
+                        this
+                    )
             }
-            .setNegativeButton("Cancel") { dialog, _ ->
+            .setNegativeButton(
+                "Cancel"
+            ) { dialog, _ ->
+
                 dialog.dismiss()
-                Toast.makeText(this, "SMS permissions are required for the app to function", Toast.LENGTH_LONG).show()
+
+                Toast.makeText(
+                    this,
+                    "SMS permissions are required for the app to function",
+                    Toast.LENGTH_LONG
+                ).show()
             }
             .show()
     }
@@ -160,45 +341,265 @@ class MainActivity : AppCompatActivity() {
         permissions: Array<out String>,
         grantResults: IntArray
     ) {
-        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
 
-        PermissionHelper.handlePermissionResult(
-            requestCode = requestCode,
-            permissions = permissions,
-            grantResults = grantResults,
-            onSmsPermissionGranted = {
-                Toast.makeText(this, "SMS permissions granted", Toast.LENGTH_SHORT).show()
-            },
-            onSmsPermissionDenied = {
-                Toast.makeText(this, "SMS permissions denied. App functionality will be limited.", Toast.LENGTH_LONG).show()
-            }
+        super.onRequestPermissionsResult(
+            requestCode,
+            permissions,
+            grantResults
         )
+
+        PermissionHelper
+            .handlePermissionResult(
+
+                requestCode =
+                    requestCode,
+
+                permissions =
+                    permissions,
+
+                grantResults =
+                    grantResults,
+
+                onSmsPermissionGranted = {
+
+                    Toast.makeText(
+                        this,
+                        "SMS permissions granted",
+                        Toast.LENGTH_SHORT
+                    ).show()
+
+                    startGatewayIfNeeded()
+                },
+
+                onSmsPermissionDenied = {
+
+                    Toast.makeText(
+                        this,
+                        "SMS permissions denied. App functionality will be limited.",
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
+            )
     }
+
+    // =====================================================
+    // SERVER STATUS
+    // =====================================================
 
     private fun updateServerStatus() {
-        val isRunning = configManager.isServerEnabled
-        serverStatusText.text = if (isRunning) {
-            "Server Status: Running on port ${configManager.serverPort}"
-        } else {
-            "Server Status: Stopped"
-        }
+
+        val localServerEnabled =
+            configManager.isServerEnabled
+
+        val directBackendEnabled =
+            configManager.isWebSocketEnabled &&
+            configManager.hasValidWebSocketConfig()
+
+        serverStatusText.text =
+            when {
+
+                localServerEnabled &&
+                    directBackendEnabled ->
+
+                    "Server Status: Local API + Direct Backend enabled"
+
+                directBackendEnabled ->
+
+                    "Server Status: Direct Backend enabled"
+
+                localServerEnabled ->
+
+                    "Server Status: Running on port ${configManager.serverPort}"
+
+                else ->
+
+                    "Server Status: Stopped"
+            }
     }
+
+    // =====================================================
+    // API KEY
+    // =====================================================
 
     private fun updateApiKeyDisplay() {
-        val apiKey = configManager.apiKey
-        apiKeyText.text = "API Key: ${apiKey.take(10)}... (tap to view/change)"
+
+        val apiKey =
+            configManager.apiKey
+
+        apiKeyText.text =
+            "API Key: ${apiKey.take(10)}... (tap to view/change)"
     }
+
+    private fun showApiKeyDialog() {
+
+        val currentApiKey =
+            configManager.apiKey
+
+        val editText =
+            EditText(this).apply {
+
+                setText(
+                    currentApiKey
+                )
+
+                selectAll()
+            }
+
+        AlertDialog
+            .Builder(this)
+            .setTitle(
+                "API Key"
+            )
+            .setMessage(
+                "Current API Key (copy this for API access):"
+            )
+            .setView(
+                editText
+            )
+            .setPositiveButton(
+                "Generate New"
+            ) { _, _ ->
+
+                configManager
+                    .regenerateApiKey()
+
+                updateApiKeyDisplay()
+
+                Toast.makeText(
+                    this,
+                    "New API key generated",
+                    Toast.LENGTH_SHORT
+                ).show()
+            }
+            .setNegativeButton(
+                "Close",
+                null
+            )
+            .show()
+    }
+
+    // =====================================================
+    // PORT
+    // =====================================================
 
     private fun updatePortDisplay() {
-        portText.text = "Port: ${configManager.serverPort} (tap to change)"
+
+        portText.text =
+            "Port: ${configManager.serverPort} (tap to change)"
     }
 
-    private fun updateApiUrls() {
-        val deviceIp = getDeviceIpAddress()
-        val baseUrl = configManager.getApiBaseUrl(deviceIp)
-        val accessType = if (configManager.useExternalDomain) "External Domain" else "Local Network"
+    private fun showPortDialog() {
 
-        val urlsText = """
+        val editText =
+            EditText(this).apply {
+
+                setText(
+                    configManager
+                        .serverPort
+                        .toString()
+                )
+
+                inputType =
+                    InputType.TYPE_CLASS_NUMBER
+            }
+
+        AlertDialog
+            .Builder(this)
+            .setTitle(
+                "Server Port"
+            )
+            .setMessage(
+                "Enter the port number for the local API server:"
+            )
+            .setView(
+                editText
+            )
+            .setPositiveButton(
+                "Save"
+            ) { _, _ ->
+
+                val newPort =
+                    editText
+                        .text
+                        .toString()
+                        .toIntOrNull()
+
+                if (
+                    newPort != null &&
+                    newPort in 1024..65535
+                ) {
+
+                    configManager.serverPort =
+                        newPort
+
+                    updatePortDisplay()
+                    updateApiUrls()
+
+                    if (
+                        configManager.isServerEnabled
+                    ) {
+
+                        restartGatewayService()
+                    }
+
+                    Toast.makeText(
+                        this,
+                        "Port updated to $newPort",
+                        Toast.LENGTH_SHORT
+                    ).show()
+
+                } else {
+
+                    Toast.makeText(
+                        this,
+                        "Please enter a valid port number (1024-65535)",
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
+            }
+            .setNegativeButton(
+                "Cancel",
+                null
+            )
+            .show()
+    }
+
+    // =====================================================
+    // API URL DISPLAY
+    // =====================================================
+
+    private fun updateApiUrls() {
+
+        val deviceIp =
+            getDeviceIpAddress()
+
+        val baseUrl =
+            configManager
+                .getApiBaseUrl(
+                    deviceIp
+                )
+
+        val accessType =
+            if (
+                configManager.useExternalDomain
+            ) {
+                "External Domain"
+            } else {
+                "Local Network"
+            }
+
+        val directBackendStatus =
+            if (
+                configManager.isWebSocketEnabled &&
+                configManager.hasValidWebSocketConfig()
+            ) {
+                "Enabled"
+            } else {
+                "Disabled"
+            }
+
+        val urlsText =
+            """
             API Base URL ($accessType): $baseUrl
 
             Main Endpoints:
@@ -207,167 +608,305 @@ class MainActivity : AppCompatActivity() {
             • SMS History: GET $baseUrl/api/history
             • Server Info: GET $baseUrl/api/info
 
-            (Tap to view full details)
-        """.trimIndent()
+            Direct OTP Backend: $directBackendStatus
 
-        apiUrlsText.text = urlsText
+            (Tap to view full details)
+            """.trimIndent()
+
+        apiUrlsText.text =
+            urlsText
     }
 
     private fun getDeviceIpAddress(): String {
+
         try {
-            val interfaces = java.net.NetworkInterface.getNetworkInterfaces()
-            while (interfaces.hasMoreElements()) {
-                val networkInterface = interfaces.nextElement()
-                if (!networkInterface.isLoopback && networkInterface.isUp) {
-                    val addresses = networkInterface.inetAddresses
-                    while (addresses.hasMoreElements()) {
-                        val address = addresses.nextElement()
-                        if (!address.isLoopbackAddress && address.hostAddress?.contains(':') == false) {
-                            return address.hostAddress ?: "192.168.1.100"
+
+            val interfaces =
+                java.net.NetworkInterface
+                    .getNetworkInterfaces()
+
+            while (
+                interfaces.hasMoreElements()
+            ) {
+
+                val networkInterface =
+                    interfaces.nextElement()
+
+                if (
+                    !networkInterface.isLoopback &&
+                    networkInterface.isUp
+                ) {
+
+                    val addresses =
+                        networkInterface
+                            .inetAddresses
+
+                    while (
+                        addresses.hasMoreElements()
+                    ) {
+
+                        val address =
+                            addresses.nextElement()
+
+                        if (
+                            !address.isLoopbackAddress &&
+                            address.hostAddress
+                                ?.contains(':') == false
+                        ) {
+
+                            return address.hostAddress
+                                ?: "192.168.1.100"
                         }
                     }
                 }
             }
-        } catch (e: Exception) {
-            // Fallback to a common local IP pattern
+
+        } catch (_: Exception) {
         }
-        return "192.168.1.100" // Fallback IP
+
+        return "192.168.1.100"
     }
 
+    // =====================================================
+    // MANUAL SMS
+    // =====================================================
+
     private fun showSendSmsDialog() {
-        if (!PermissionHelper.hasSmsPermissions(this)) {
-            Toast.makeText(this, "SMS permissions required", Toast.LENGTH_SHORT).show()
+
+        if (
+            !PermissionHelper
+                .hasSmsPermissions(this)
+        ) {
+
+            Toast.makeText(
+                this,
+                "SMS permissions required",
+                Toast.LENGTH_SHORT
+            ).show()
+
             return
         }
 
-        val dialogView = layoutInflater.inflate(R.layout.dialog_send_sms, null)
-        val phoneEditText = dialogView.findViewById<EditText>(R.id.phoneEditText)
-        val messageEditText = dialogView.findViewById<EditText>(R.id.messageEditText)
+        val dialogView =
+            layoutInflater.inflate(
+                R.layout.dialog_send_sms,
+                null
+            )
 
-        AlertDialog.Builder(this)
-            .setTitle("Send SMS")
-            .setView(dialogView)
-            .setPositiveButton("Send") { _, _ ->
-                val phone = phoneEditText.text.toString().trim()
-                val message = messageEditText.text.toString().trim()
+        val phoneEditText =
+            dialogView
+                .findViewById<EditText>(
+                    R.id.phoneEditText
+                )
 
-                if (phone.isBlank() || message.isBlank()) {
-                    Toast.makeText(this, "Please fill in all fields", Toast.LENGTH_SHORT).show()
+        val messageEditText =
+            dialogView
+                .findViewById<EditText>(
+                    R.id.messageEditText
+                )
+
+        AlertDialog
+            .Builder(this)
+            .setTitle(
+                "Send SMS"
+            )
+            .setView(
+                dialogView
+            )
+            .setPositiveButton(
+                "Send"
+            ) { _, _ ->
+
+                val phone =
+                    phoneEditText
+                        .text
+                        .toString()
+                        .trim()
+
+                val message =
+                    messageEditText
+                        .text
+                        .toString()
+                        .trim()
+
+                if (
+                    phone.isBlank() ||
+                    message.isBlank()
+                ) {
+
+                    Toast.makeText(
+                        this,
+                        "Please fill in all fields",
+                        Toast.LENGTH_SHORT
+                    ).show()
+
                     return@setPositiveButton
                 }
 
-                sendSms(phone, message)
+                sendSms(
+                    phone,
+                    message
+                )
             }
-            .setNegativeButton("Cancel", null)
+            .setNegativeButton(
+                "Cancel",
+                null
+            )
             .show()
     }
 
-    private fun sendSms(phoneNumber: String, message: String) {
+    private fun sendSms(
+        phoneNumber: String,
+        message: String
+    ) {
+
         lifecycleScope.launch {
+
             try {
-                val result = smsManager.sendSms(phoneNumber, message)
-                if (result.isSuccess) {
-                    Toast.makeText(this@MainActivity, "SMS queued for sending", Toast.LENGTH_SHORT).show()
+
+                val result =
+                    smsManager.sendSms(
+                        phoneNumber,
+                        message
+                    )
+
+                if (
+                    result.isSuccess
+                ) {
+
+                    Toast.makeText(
+                        this@MainActivity,
+                        "SMS queued for sending",
+                        Toast.LENGTH_SHORT
+                    ).show()
+
                 } else {
-                    val error = result.exceptionOrNull()
-                    Toast.makeText(this@MainActivity, "Failed to send SMS: ${error?.message}", Toast.LENGTH_LONG).show()
+
+                    val error =
+                        result.exceptionOrNull()
+
+                    Toast.makeText(
+                        this@MainActivity,
+                        "Failed to send SMS: ${error?.message}",
+                        Toast.LENGTH_LONG
+                    ).show()
                 }
+
             } catch (e: Exception) {
-                Toast.makeText(this@MainActivity, "Error: ${e.message}", Toast.LENGTH_LONG).show()
+
+                Toast.makeText(
+                    this@MainActivity,
+                    "Error: ${e.message}",
+                    Toast.LENGTH_LONG
+                ).show()
             }
         }
     }
 
-    private fun showSmsDetails(sms: com.multi.encription.sms.database.SmsEntity) {
-        val message = """
+    // =====================================================
+    // SMS DETAILS
+    // =====================================================
+
+    private fun showSmsDetails(
+        sms: com.multi.encription.sms.database.SmsEntity
+    ) {
+
+        val dateFormat =
+            java.text.SimpleDateFormat(
+                "yyyy-MM-dd HH:mm:ss",
+                java.util.Locale.getDefault()
+            )
+
+        val message =
+            """
             Phone: ${sms.phoneNumber}
             Message: ${sms.message}
             Status: ${sms.status}
-            Timestamp: ${java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date(sms.timestamp))}
-            ${if (sms.deliveryTimestamp != null) "Delivered: ${java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date(sms.deliveryTimestamp))}" else ""}
-            ${if (sms.errorMessage != null) "Error: ${sms.errorMessage}" else ""}
-            ${if (sms.requestId != null) "Request ID: ${sms.requestId}" else ""}
-        """.trimIndent()
-
-        AlertDialog.Builder(this)
-            .setTitle("SMS Details")
-            .setMessage(message)
-            .setPositiveButton("OK", null)
-            .show()
-    }
-
-    private fun showApiKeyDialog() {
-        val currentApiKey = configManager.apiKey
-        val editText = EditText(this).apply {
-            setText(currentApiKey)
-            selectAll()
-        }
-
-        AlertDialog.Builder(this)
-            .setTitle("API Key")
-            .setMessage("Current API Key (copy this for API access):")
-            .setView(editText)
-            .setPositiveButton("Generate New") { _, _ ->
-                val newApiKey = configManager.regenerateApiKey()
-                updateApiKeyDisplay()
-                Toast.makeText(this, "New API key generated", Toast.LENGTH_SHORT).show()
-            }
-            .setNegativeButton("Close", null)
-            .show()
-    }
-
-    private fun showPortDialog() {
-        val editText = EditText(this).apply {
-            setText(configManager.serverPort.toString())
-            inputType = android.text.InputType.TYPE_CLASS_NUMBER
-        }
-
-        AlertDialog.Builder(this)
-            .setTitle("Server Port")
-            .setMessage("Enter the port number for the API server:")
-            .setView(editText)
-            .setPositiveButton("Save") { _, _ ->
-                val portText = editText.text.toString()
-                val port = portText.toIntOrNull()
-
-                if (port != null && port in 1024..65535) {
-                    configManager.serverPort = port
-                    updatePortDisplay()
-                    updateApiUrls()
-
-                    if (configManager.isServerEnabled) {
-                        // Restart server with new port
-                        SmsGatewayService.stopService(this)
-                        SmsGatewayService.startService(this)
-                    }
-
-                    Toast.makeText(this, "Port updated to $port", Toast.LENGTH_SHORT).show()
+            Timestamp: ${dateFormat.format(java.util.Date(sms.timestamp))}
+            ${
+                if (
+                    sms.deliveryTimestamp != null
+                ) {
+                    "Delivered: ${dateFormat.format(java.util.Date(sms.deliveryTimestamp))}"
                 } else {
-                    Toast.makeText(this, "Please enter a valid port number (1024-65535)", Toast.LENGTH_LONG).show()
+                    ""
                 }
             }
-            .setNegativeButton("Cancel", null)
+            ${
+                if (
+                    sms.errorMessage != null
+                ) {
+                    "Error: ${sms.errorMessage}"
+                } else {
+                    ""
+                }
+            }
+            ${
+                if (
+                    sms.requestId != null
+                ) {
+                    "Request ID: ${sms.requestId}"
+                } else {
+                    ""
+                }
+            }
+            """.trimIndent()
+
+        AlertDialog
+            .Builder(this)
+            .setTitle(
+                "SMS Details"
+            )
+            .setMessage(
+                message
+            )
+            .setPositiveButton(
+                "OK",
+                null
+            )
             .show()
     }
 
-    private fun showApiUrlsDialog() {
-        val deviceIp = getDeviceIpAddress()
-        val port = configManager.serverPort
-        val apiKey = configManager.apiKey
-        val baseUrl = "http://$deviceIp:$port"
+    // =====================================================
+    // API ENDPOINT DETAILS
+    // =====================================================
 
-        val message = """
-            📡 SMS Gateway API Endpoints
+    private fun showApiUrlsDialog() {
+
+        val deviceIp =
+            getDeviceIpAddress()
+
+        val port =
+            configManager.serverPort
+
+        val apiKey =
+            configManager.apiKey
+
+        val baseUrl =
+            "http://$deviceIp:$port"
+
+        val directBackend =
+            if (
+                configManager.isWebSocketEnabled
+            ) {
+                "Enabled"
+            } else {
+                "Disabled"
+            }
+
+        val message =
+            """
+            SMS Gateway API Endpoints
 
             Base URL: $baseUrl
             API Key: $apiKey
 
-            🔗 Available Endpoints:
+            Available Endpoints:
 
             1. Send SMS:
             POST $baseUrl/api/send
             Headers: X-API-Key: $apiKey
-            Body: {"phone_number": "+1234567890", "message": "Hello!"}
+            Body: {"phone_number":"+1234567890","message":"Hello!"}
 
             2. Check SMS Status:
             GET $baseUrl/api/status?sms_id=123
@@ -377,226 +916,696 @@ class MainActivity : AppCompatActivity() {
             GET $baseUrl/api/history?limit=10
             Headers: X-API-Key: $apiKey
 
-            4. Server Info (No Auth):
+            4. Server Info:
             GET $baseUrl/api/info
 
             5. Send Bulk SMS:
             POST $baseUrl/api/send-bulk
             Headers: X-API-Key: $apiKey
-            Body: {"messages": [{"phone_number": "+1234567890", "message": "Hello!"}]}
 
-            📋 Copy these URLs to use in your applications!
-        """.trimIndent()
+            Direct OTP Backend: $directBackend
+            """.trimIndent()
 
-        AlertDialog.Builder(this)
-            .setTitle("API Endpoints")
-            .setMessage(message)
-            .setPositiveButton("Copy Base URL") { _, _ ->
-                copyToClipboard("Base URL", baseUrl)
+        AlertDialog
+            .Builder(this)
+            .setTitle(
+                "API Endpoints"
+            )
+            .setMessage(
+                message
+            )
+            .setPositiveButton(
+                "Copy Base URL"
+            ) { _, _ ->
+
+                copyToClipboard(
+                    "Base URL",
+                    baseUrl
+                )
             }
-            .setNeutralButton("Copy API Key") { _, _ ->
-                copyToClipboard("API Key", apiKey)
+            .setNeutralButton(
+                "Copy API Key"
+            ) { _, _ ->
+
+                copyToClipboard(
+                    "API Key",
+                    apiKey
+                )
             }
-            .setNegativeButton("Close", null)
+            .setNegativeButton(
+                "Close",
+                null
+            )
             .show()
     }
 
+    // =====================================================
+    // TEST API
+    // =====================================================
+
     private fun showTestApiDialog() {
-        if (!configManager.isServerEnabled) {
-            Toast.makeText(this, "Please enable the API server first", Toast.LENGTH_SHORT).show()
+
+        if (
+            !configManager.isServerEnabled
+        ) {
+
+            Toast.makeText(
+                this,
+                "Please enable the local API server first",
+                Toast.LENGTH_SHORT
+            ).show()
+
             return
         }
 
-        val dialogView = layoutInflater.inflate(R.layout.dialog_test_api, null)
-        val phoneEditText = dialogView.findViewById<EditText>(R.id.testPhoneEditText)
-        val messageEditText = dialogView.findViewById<EditText>(R.id.testMessageEditText)
-        val resultTextView = dialogView.findViewById<TextView>(R.id.testResultTextView)
+        val dialogView =
+            layoutInflater.inflate(
+                R.layout.dialog_test_api,
+                null
+            )
 
-        // Pre-fill with example data
-        phoneEditText.setText("+1234567890")
-        messageEditText.setText("Test message from SMS Gateway API")
+        val phoneEditText =
+            dialogView
+                .findViewById<EditText>(
+                    R.id.testPhoneEditText
+                )
 
-        val dialog = AlertDialog.Builder(this)
-            .setTitle("Test API - Send SMS")
-            .setView(dialogView)
-            .setPositiveButton("Send Test SMS") { _, _ ->
-                val phone = phoneEditText.text.toString().trim()
-                val message = messageEditText.text.toString().trim()
+        val messageEditText =
+            dialogView
+                .findViewById<EditText>(
+                    R.id.testMessageEditText
+                )
 
-                if (phone.isBlank() || message.isBlank()) {
-                    Toast.makeText(this, "Please fill in all fields", Toast.LENGTH_SHORT).show()
+        phoneEditText.setText(
+            "+1234567890"
+        )
+
+        messageEditText.setText(
+            "Test message from SMS Gateway API"
+        )
+
+        AlertDialog
+            .Builder(this)
+            .setTitle(
+                "Test API - Send SMS"
+            )
+            .setView(
+                dialogView
+            )
+            .setPositiveButton(
+                "Send Test SMS"
+            ) { _, _ ->
+
+                val phone =
+                    phoneEditText
+                        .text
+                        .toString()
+                        .trim()
+
+                val message =
+                    messageEditText
+                        .text
+                        .toString()
+                        .trim()
+
+                if (
+                    phone.isBlank() ||
+                    message.isBlank()
+                ) {
+
+                    Toast.makeText(
+                        this,
+                        "Please fill in all fields",
+                        Toast.LENGTH_SHORT
+                    ).show()
+
                     return@setPositiveButton
                 }
 
-                testApiSendSms(phone, message)
+                testApiSendSms(
+                    phone,
+                    message
+                )
             }
-            .setNeutralButton("Test Server Info") { _, _ ->
+            .setNeutralButton(
+                "Test Server Info"
+            ) { _, _ ->
+
                 testApiServerInfo()
             }
-            .setNegativeButton("Close", null)
-            .create()
-
-        dialog.show()
+            .setNegativeButton(
+                "Close",
+                null
+            )
+            .show()
     }
 
-    private fun testApiSendSms(phoneNumber: String, message: String) {
+    private fun testApiSendSms(
+        phoneNumber: String,
+        message: String
+    ) {
+
         lifecycleScope.launch {
+
             try {
-                val result = smsManager.sendSms(phoneNumber, message, configManager.apiKey, "test-${System.currentTimeMillis()}")
-                if (result.isSuccess) {
-                    val smsId = result.getOrThrow()
-                    showTestResult("✅ SMS Test Successful", """
+
+                val result =
+                    smsManager.sendSms(
+                        phoneNumber,
+                        message,
+                        configManager.apiKey,
+                        "test-${System.currentTimeMillis()}"
+                    )
+
+                if (
+                    result.isSuccess
+                ) {
+
+                    val smsId =
+                        result.getOrThrow()
+
+                    showTestResult(
+                        "SMS Test Successful",
+                        """
                         SMS queued for sending!
 
                         SMS ID: $smsId
                         Phone: $phoneNumber
                         Message: $message
 
-                        Check the SMS History below to see delivery status.
-                    """.trimIndent())
+                        Check SMS History for delivery status.
+                        """.trimIndent()
+                    )
+
                 } else {
-                    val error = result.exceptionOrNull()
-                    showTestResult("❌ SMS Test Failed", "Error: ${error?.message}")
+
+                    val error =
+                        result.exceptionOrNull()
+
+                    showTestResult(
+                        "SMS Test Failed",
+                        "Error: ${error?.message}"
+                    )
                 }
+
             } catch (e: Exception) {
-                showTestResult("❌ SMS Test Failed", "Exception: ${e.message}")
+
+                showTestResult(
+                    "SMS Test Failed",
+                    "Exception: ${e.message}"
+                )
             }
         }
     }
 
     private fun testApiServerInfo() {
-        val deviceIp = getDeviceIpAddress()
-        val port = configManager.serverPort
-        val infoUrl = "http://$deviceIp:$port/api/info"
 
-        showTestResult("📡 Server Info Test", """
+        val deviceIp =
+            getDeviceIpAddress()
+
+        val port =
+            configManager.serverPort
+
+        val infoUrl =
+            "http://$deviceIp:$port/api/info"
+
+        showTestResult(
+            "Server Info Test",
+            """
             Test this URL in your browser or API client:
 
             $infoUrl
 
-            This endpoint doesn't require authentication and should return server information in JSON format.
+            This endpoint does not require authentication.
 
-            If you can access this URL, your API server is working correctly!
-        """.trimIndent())
+            If the URL returns server information,
+            the local API server is working.
+            """.trimIndent()
+        )
     }
 
-    private fun showTestResult(title: String, message: String) {
-        AlertDialog.Builder(this)
-            .setTitle(title)
-            .setMessage(message)
-            .setPositiveButton("OK", null)
+    private fun showTestResult(
+        title: String,
+        message: String
+    ) {
+
+        AlertDialog
+            .Builder(this)
+            .setTitle(
+                title
+            )
+            .setMessage(
+                message
+            )
+            .setPositiveButton(
+                "OK",
+                null
+            )
             .show()
     }
 
-    private fun copyToClipboard(label: String, text: String) {
-        val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
-        val clip = android.content.ClipData.newPlainText(label, text)
-        clipboard.setPrimaryClip(clip)
-        Toast.makeText(this, "$label copied to clipboard", Toast.LENGTH_SHORT).show()
+    // =====================================================
+    // DIRECT BACKEND / WEBSOCKET
+    // =====================================================
+
+    private fun updateDirectBackendButton() {
+
+        externalDomainButton.text =
+            if (
+                configManager.isWebSocketEnabled &&
+                configManager.hasValidWebSocketConfig()
+            ) {
+
+                "Direct Backend: Enabled"
+
+            } else {
+
+                "Setup Direct Backend"
+            }
+
+        updateServerStatus()
+        updateApiUrls()
     }
 
-    private fun updateExternalDomainButton() {
-        val buttonText = if (configManager.useExternalDomain) {
-            "External Domain: ${configManager.externalDomain}"
-        } else {
-            "Setup External Domain"
+    private fun showDirectBackendDialog() {
+
+        val density =
+            resources.displayMetrics.density
+
+        val padding =
+            (20 * density)
+                .toInt()
+
+        val smallPadding =
+            (8 * density)
+                .toInt()
+
+        val container =
+            LinearLayout(this).apply {
+
+                orientation =
+                    LinearLayout.VERTICAL
+
+                setPadding(
+                    padding,
+                    padding,
+                    padding,
+                    smallPadding
+                )
+            }
+
+        val enableSwitch =
+            SwitchMaterial(this).apply {
+
+                text =
+                    "Enable Direct Backend Connection"
+
+                isChecked =
+                    configManager
+                        .isWebSocketEnabled
+            }
+
+        val urlLabel =
+            TextView(this).apply {
+
+                text =
+                    "WebSocket Backend URL"
+
+                setPadding(
+                    0,
+                    padding,
+                    0,
+                    smallPadding
+                )
+            }
+
+        val urlInput =
+            EditText(this).apply {
+
+                hint =
+                    DEFAULT_WEBSOCKET_URL
+
+                setSingleLine(
+                    true
+                )
+
+                val savedUrl =
+                    configManager
+                        .webSocketUrl
+
+                setText(
+                    if (
+                        savedUrl.isNotBlank()
+                    ) {
+                        savedUrl
+                    } else {
+                        DEFAULT_WEBSOCKET_URL
+                    }
+                )
+            }
+
+        val tokenLabel =
+            TextView(this).apply {
+
+                text =
+                    "Gateway Token"
+
+                setPadding(
+                    0,
+                    padding,
+                    0,
+                    smallPadding
+                )
+            }
+
+        val tokenInput =
+            EditText(this).apply {
+
+                hint =
+                    "Enter the GATEWAY_TOKEN from Deplexo"
+
+                setSingleLine(
+                    true
+                )
+
+                inputType =
+                    InputType.TYPE_CLASS_TEXT or
+                    InputType.TYPE_TEXT_VARIATION_PASSWORD
+
+                setText(
+                    configManager
+                        .gatewayToken
+                )
+            }
+
+        val infoText =
+            TextView(this).apply {
+
+                text =
+                    """
+                    Direct Backend connects this Android phone directly to the OTP server.
+
+                    When enabled, Termux and localhost.run are not required.
+
+                    Keep this phone connected to the internet and allow SMS Gateway to run in the background.
+                    """.trimIndent()
+
+                setPadding(
+                    0,
+                    padding,
+                    0,
+                    0
+                )
+            }
+
+        container.addView(
+            enableSwitch
+        )
+
+        container.addView(
+            urlLabel
+        )
+
+        container.addView(
+            urlInput
+        )
+
+        container.addView(
+            tokenLabel
+        )
+
+        container.addView(
+            tokenInput
+        )
+
+        container.addView(
+            infoText
+        )
+
+        val dialog =
+            AlertDialog
+                .Builder(this)
+                .setTitle(
+                    "Direct Backend Connection"
+                )
+                .setView(
+                    container
+                )
+                .setPositiveButton(
+                    "Save",
+                    null
+                )
+                .setNegativeButton(
+                    "Cancel",
+                    null
+                )
+                .create()
+
+        dialog.setOnShowListener {
+
+            dialog
+                .getButton(
+                    AlertDialog.BUTTON_POSITIVE
+                )
+                .setOnClickListener {
+
+                    val enabled =
+                        enableSwitch
+                            .isChecked
+
+                    val url =
+                        urlInput
+                            .text
+                            .toString()
+                            .trim()
+
+                    val token =
+                        tokenInput
+                            .text
+                            .toString()
+                            .trim()
+
+                    if (
+                        enabled
+                    ) {
+
+                        if (
+                            !url.startsWith(
+                                "wss://"
+                            ) &&
+                            !url.startsWith(
+                                "ws://"
+                            )
+                        ) {
+
+                            Toast.makeText(
+                                this,
+                                "WebSocket URL must start with wss://",
+                                Toast.LENGTH_LONG
+                            ).show()
+
+                            return@setOnClickListener
+                        }
+
+                        if (
+                            token.isBlank()
+                        ) {
+
+                            Toast.makeText(
+                                this,
+                                "Gateway Token is required",
+                                Toast.LENGTH_LONG
+                            ).show()
+
+                            return@setOnClickListener
+                        }
+
+                        if (
+                            !PermissionHelper
+                                .hasSmsPermissions(
+                                    this
+                                )
+                        ) {
+
+                            Toast.makeText(
+                                this,
+                                "SMS permission must be granted before enabling Direct Backend",
+                                Toast.LENGTH_LONG
+                            ).show()
+
+                            PermissionHelper
+                                .requestSmsPermissions(
+                                    this
+                                )
+
+                            return@setOnClickListener
+                        }
+                    }
+
+                    configManager.webSocketUrl =
+                        url
+
+                    configManager.gatewayToken =
+                        token
+
+                    configManager.isWebSocketEnabled =
+                        enabled
+
+                    restartGatewayService()
+
+                    updateDirectBackendButton()
+
+                    val toastMessage =
+                        if (
+                            enabled
+                        ) {
+
+                            "Direct backend enabled. Connecting..."
+
+                        } else {
+
+                            "Direct backend disabled"
+                        }
+
+                    Toast.makeText(
+                        this,
+                        toastMessage,
+                        Toast.LENGTH_SHORT
+                    ).show()
+
+                    dialog.dismiss()
+                }
         }
-        externalDomainButton.text = buttonText
+
+        dialog.show()
     }
 
-    private fun showExternalDomainDialog() {
-        val dialogView = layoutInflater.inflate(R.layout.dialog_external_domain, null)
-        val domainEditText = dialogView.findViewById<EditText>(R.id.domainEditText)
-        val enableSwitch = dialogView.findViewById<Switch>(R.id.enableExternalDomainSwitch)
-        val instructionsText = dialogView.findViewById<TextView>(R.id.instructionsText)
+    // =====================================================
+    // SERVICE CONTROL
+    // =====================================================
 
-        // Pre-fill current values
-        domainEditText.setText(configManager.externalDomain)
-        enableSwitch.isChecked = configManager.useExternalDomain
+    private fun startGatewayIfNeeded() {
 
-        instructionsText.text = """
-            To use a custom domain:
+        if (
+            configManager.isServerEnabled ||
+            (
+                configManager.isWebSocketEnabled &&
+                configManager.hasValidWebSocketConfig()
+            )
+        ) {
 
-            1. Set up a reverse proxy (VPS + Nginx)
-            2. Point your domain to the proxy server
-            3. Configure proxy to forward to: ${getDeviceIpAddress()}:${configManager.serverPort}
-            4. Enter your domain below (e.g., sms.yourdomain.com)
-
-            See CUSTOM_DOMAIN_SETUP.md for detailed instructions.
-        """.trimIndent()
-
-        AlertDialog.Builder(this)
-            .setTitle("External Domain Setup")
-            .setView(dialogView)
-            .setPositiveButton("Save") { _, _ ->
-                val domain = domainEditText.text.toString().trim()
-                val enabled = enableSwitch.isChecked
-
-                if (enabled && domain.isBlank()) {
-                    Toast.makeText(this, "Please enter a domain name", Toast.LENGTH_SHORT).show()
-                    return@setPositiveButton
-                }
-
-                configManager.externalDomain = domain
-                configManager.useExternalDomain = enabled
-
-                updateApiUrls()
-                updateExternalDomainButton()
-
-                val message = if (enabled) {
-                    "External domain enabled: $domain"
-                } else {
-                    "Using local network access"
-                }
-                Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
-            }
-            .setNeutralButton("View Setup Guide") { _, _ ->
-                showExternalDomainSetupGuide()
-            }
-            .setNegativeButton("Cancel", null)
-            .show()
+            SmsGatewayService
+                .startService(this)
+        }
     }
 
+    private fun restartGatewayService() {
+
+        /*
+         * Stop the existing instance first so new
+         * SharedPreferences/WebSocket configuration
+         * is loaded by the service.
+         */
+        SmsGatewayService
+            .stopService(this)
+
+        if (
+            configManager.isServerEnabled ||
+            (
+                configManager.isWebSocketEnabled &&
+                configManager.hasValidWebSocketConfig()
+            )
+        ) {
+
+            SmsGatewayService
+                .startService(this)
+        }
+    }
+
+    // =====================================================
+    // CLIPBOARD
+    // =====================================================
+
+    private fun copyToClipboard(
+        label: String,
+        text: String
+    ) {
+
+        val clipboard =
+            getSystemService(
+                Context.CLIPBOARD_SERVICE
+            ) as android.content.ClipboardManager
+
+        val clip =
+            android.content.ClipData
+                .newPlainText(
+                    label,
+                    text
+                )
+
+        clipboard.setPrimaryClip(
+            clip
+        )
+
+        Toast.makeText(
+            this,
+            "$label copied to clipboard",
+            Toast.LENGTH_SHORT
+        ).show()
+    }
+
+    // =====================================================
+    // LEGACY EXTERNAL DOMAIN GUIDE
+    // =====================================================
+
+    /*
+     * Kept only for compatibility/reference.
+     * Direct Backend is now the recommended method.
+     */
     private fun showExternalDomainSetupGuide() {
-        val deviceIp = getDeviceIpAddress()
-        val port = configManager.serverPort
 
-        val guide = """
-            🌐 External Domain Setup Guide
+        val deviceIp =
+            getDeviceIpAddress()
 
-            Your Android device: $deviceIp:$port
+        val port =
+            configManager.serverPort
 
-            📋 Quick Setup Options:
+        val guide =
+            """
+            Legacy External Domain Setup
 
-            1. VPS + Nginx (Recommended)
-            • Get a VPS (DigitalOcean, Linode, etc.)
-            • Install Nginx
-            • Configure reverse proxy to $deviceIp:$port
-            • Get SSL certificate (Let's Encrypt)
+            Android device:
+            $deviceIp:$port
 
-            2. Cloudflare Tunnel (Free)
-            • Install cloudflared on any server
-            • Create tunnel to $deviceIp:$port
-            • Zero configuration needed
+            The app now supports Direct Backend Connection.
 
-            3. Dynamic DNS + Port Forwarding
-            • Configure router port forwarding
-            • Use DuckDNS or No-IP for dynamic DNS
-            • Forward port $port to $deviceIp
+            Recommended:
+            Use Direct Backend instead of exposing port 8080 publicly.
 
-            📖 See CUSTOM_DOMAIN_SETUP.md for detailed instructions.
+            Direct Backend:
+            Deplexo OTP Backend
+                    ↕
+            Secure WebSocket
+                    ↕
+            Android SMS Gateway
+                    ↓
+                  SIM/SMS
 
-            ⚠️ Security Notes:
-            • Use strong API keys
-            • Enable rate limiting
-            • Monitor access logs
-            • Consider IP whitelisting
-        """.trimIndent()
+            This removes the need for Termux and localhost.run.
+            """.trimIndent()
 
-        AlertDialog.Builder(this)
-            .setTitle("Setup Guide")
-            .setMessage(guide)
-            .setPositiveButton("OK", null)
+        AlertDialog
+            .Builder(this)
+            .setTitle(
+                "Connection Guide"
+            )
+            .setMessage(
+                guide
+            )
+            .setPositiveButton(
+                "OK",
+                null
+            )
             .show()
     }
 }
