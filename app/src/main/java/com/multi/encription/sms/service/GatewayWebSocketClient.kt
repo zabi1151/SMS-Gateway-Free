@@ -7,8 +7,10 @@ import com.google.gson.JsonObject
 import com.multi.encription.sms.core.SmsManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -25,183 +27,454 @@ class GatewayWebSocketClient(
 ) {
 
     companion object {
-        private const val TAG = "GatewayWebSocket"
-        private const val RECONNECT_DELAY = 5000L
+
+        private const val TAG =
+            "GatewayWebSocket"
+
+        private const val INITIAL_RECONNECT_DELAY =
+            3000L
+
+        private const val MAX_RECONNECT_DELAY =
+            30000L
     }
 
-    private val appContext = context.applicationContext
-    private val smsManager = SmsManager(appContext)
-    private val gson = Gson()
+    private val appContext =
+        context.applicationContext
+
+    private val smsManager =
+        SmsManager(appContext)
+
+    private val gson =
+        Gson()
 
     private val scope =
-        CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        CoroutineScope(
+            SupervisorJob() +
+                Dispatchers.IO
+        )
 
-    private val client = OkHttpClient.Builder()
-        .pingInterval(25, TimeUnit.SECONDS)
-        .connectTimeout(20, TimeUnit.SECONDS)
-        .readTimeout(0, TimeUnit.MILLISECONDS)
-        .retryOnConnectionFailure(true)
-        .build()
+    private val client =
+        OkHttpClient.Builder()
+            .pingInterval(
+                20,
+                TimeUnit.SECONDS
+            )
+            .connectTimeout(
+                20,
+                TimeUnit.SECONDS
+            )
+            .writeTimeout(
+                20,
+                TimeUnit.SECONDS
+            )
+            .readTimeout(
+                0,
+                TimeUnit.MILLISECONDS
+            )
+            .retryOnConnectionFailure(
+                true
+            )
+            .build()
 
-    private var webSocket: WebSocket? = null
-    private var shouldReconnect = true
-    private var reconnecting = false
+    @Volatile
+    private var webSocket:
+        WebSocket? = null
 
+    @Volatile
+    private var connected =
+        false
+
+    @Volatile
+    private var connecting =
+        false
+
+    @Volatile
+    private var shouldReconnect =
+        true
+
+    private var reconnectJob:
+        Job? = null
+
+    private var reconnectDelay =
+        INITIAL_RECONNECT_DELAY
+
+    // =====================================================
+    // CONNECT
+    // =====================================================
+
+    @Synchronized
     fun connect() {
-        if (webSocket != null) {
+
+        if (
+            !shouldReconnect
+        ) {
             return
         }
 
-        try {
-            Log.i(TAG, "Connecting to gateway backend...")
+        if (
+            connected ||
+            connecting
+        ) {
 
-            val request = Request.Builder()
-                .url(serverUrl)
-                .addHeader(
-                    "Authorization",
-                    "Bearer $gatewayToken"
-                )
-                .build()
-
-            webSocket = client.newWebSocket(
-                request,
-                socketListener
+            Log.d(
+                TAG,
+                "WebSocket already connected/connecting"
             )
 
+            return
+        }
+
+        connecting =
+            true
+
+        try {
+
+            Log.i(
+                TAG,
+                "Connecting to OTP backend..."
+            )
+
+            val request =
+                Request.Builder()
+                    .url(
+                        serverUrl
+                    )
+                    .addHeader(
+                        "Authorization",
+                        "Bearer $gatewayToken"
+                    )
+                    .build()
+
+            webSocket =
+                client.newWebSocket(
+                    request,
+                    socketListener
+                )
+
         } catch (e: Exception) {
+
             Log.e(
                 TAG,
                 "Unable to create WebSocket connection",
                 e
             )
 
+            connecting =
+                false
+
+            connected =
+                false
+
+            webSocket =
+                null
+
             scheduleReconnect()
         }
     }
 
+    // =====================================================
+    // DISCONNECT
+    // =====================================================
+
+    @Synchronized
     fun disconnect() {
-        shouldReconnect = false
+
+        Log.i(
+            TAG,
+            "Stopping WebSocket client"
+        )
+
+        shouldReconnect =
+            false
+
+        connected =
+            false
+
+        connecting =
+            false
+
+        reconnectJob?.cancel()
+
+        reconnectJob =
+            null
 
         try {
+
             webSocket?.close(
                 1000,
                 "Gateway service stopped"
             )
+
+        } catch (e: Exception) {
+
+            Log.w(
+                TAG,
+                "Error while closing WebSocket",
+                e
+            )
+        }
+
+        webSocket =
+            null
+
+        try {
+
+            client.dispatcher
+                .cancelAll()
+
         } catch (_: Exception) {
         }
 
-        webSocket = null
-        client.dispatcher.executorService.shutdown()
+        try {
+
+            client.dispatcher
+                .executorService
+                .shutdown()
+
+        } catch (_: Exception) {
+        }
+
+        try {
+
+            client.connectionPool
+                .evictAll()
+
+        } catch (_: Exception) {
+        }
+
         scope.cancel()
     }
 
+    // =====================================================
+    // WEBSOCKET LISTENER
+    // =====================================================
+
     private val socketListener =
-        object : WebSocketListener() {
+        object :
+            WebSocketListener() {
 
             override fun onOpen(
-                webSocket: WebSocket,
+                socket: WebSocket,
                 response: Response
             ) {
+
                 Log.i(
                     TAG,
                     "Connected to OTP backend"
                 )
 
-                reconnecting = false
+                webSocket =
+                    socket
 
-                val readyMessage = JsonObject().apply {
-                    addProperty(
-                        "type",
-                        "gateway_ready"
-                    )
-                }
+                connecting =
+                    false
 
-                webSocket.send(
-                    gson.toJson(readyMessage)
+                connected =
+                    true
+
+                reconnectDelay =
+                    INITIAL_RECONNECT_DELAY
+
+                reconnectJob?.cancel()
+
+                reconnectJob =
+                    null
+
+                sendGatewayReady(
+                    socket
                 )
             }
 
             override fun onMessage(
-                webSocket: WebSocket,
+                socket: WebSocket,
                 text: String
             ) {
+
                 Log.d(
                     TAG,
                     "Command received from backend"
                 )
 
                 handleMessage(
-                    webSocket,
+                    socket,
                     text
                 )
             }
 
             override fun onMessage(
-                webSocket: WebSocket,
+                socket: WebSocket,
                 bytes: ByteString
             ) {
+
                 onMessage(
-                    webSocket,
+                    socket,
                     bytes.utf8()
                 )
             }
 
             override fun onClosing(
-                webSocket: WebSocket,
+                socket: WebSocket,
                 code: Int,
                 reason: String
             ) {
+
                 Log.w(
                     TAG,
                     "WebSocket closing: $code $reason"
                 )
 
-                webSocket.close(
+                connected =
+                    false
+
+                socket.close(
                     code,
                     reason
                 )
             }
 
             override fun onClosed(
-                webSocket: WebSocket,
+                socket: WebSocket,
                 code: Int,
                 reason: String
             ) {
+
                 Log.w(
                     TAG,
                     "WebSocket closed: $code $reason"
                 )
 
-                this@GatewayWebSocketClient.webSocket =
-                    null
-
-                scheduleReconnect()
+                handleDisconnectedSocket(
+                    socket
+                )
             }
 
             override fun onFailure(
-                webSocket: WebSocket,
-                t: Throwable,
+                socket: WebSocket,
+                throwable: Throwable,
                 response: Response?
             ) {
+
                 Log.e(
                     TAG,
-                    "WebSocket connection failed: ${t.message}"
+                    "WebSocket connection failed: ${throwable.message}",
+                    throwable
                 )
 
-                this@GatewayWebSocketClient.webSocket =
-                    null
-
-                scheduleReconnect()
+                handleDisconnectedSocket(
+                    socket
+                )
             }
         }
+
+    // =====================================================
+    // DISCONNECTED SOCKET
+    // =====================================================
+
+    @Synchronized
+    private fun handleDisconnectedSocket(
+        socket: WebSocket
+    ) {
+
+        /*
+         * Ignore callbacks belonging to an older socket
+         * after a newer connection has already replaced it.
+         */
+        if (
+            webSocket != null &&
+            webSocket !== socket
+        ) {
+
+            Log.d(
+                TAG,
+                "Ignoring callback from stale WebSocket"
+            )
+
+            return
+        }
+
+        connected =
+            false
+
+        connecting =
+            false
+
+        webSocket =
+            null
+
+        if (
+            shouldReconnect
+        ) {
+
+            scheduleReconnect()
+        }
+    }
+
+    // =====================================================
+    // READY MESSAGE
+    // =====================================================
+
+    private fun sendGatewayReady(
+        socket: WebSocket
+    ) {
+
+        try {
+
+            val readyMessage =
+                JsonObject().apply {
+
+                    addProperty(
+                        "type",
+                        "gateway_ready"
+                    )
+                }
+
+            val sent =
+                socket.send(
+                    gson.toJson(
+                        readyMessage
+                    )
+                )
+
+            if (
+                sent
+            ) {
+
+                Log.i(
+                    TAG,
+                    "Gateway ready message sent"
+                )
+
+            } else {
+
+                Log.w(
+                    TAG,
+                    "Unable to queue gateway ready message"
+                )
+            }
+
+        } catch (e: Exception) {
+
+            Log.e(
+                TAG,
+                "Unable to send gateway ready message",
+                e
+            )
+        }
+    }
+
+    // =====================================================
+    // COMMAND HANDLING
+    // =====================================================
 
     private fun handleMessage(
         socket: WebSocket,
         message: String
     ) {
+
         scope.launch {
 
             try {
+
                 val json =
                     gson.fromJson(
                         message,
@@ -209,25 +482,37 @@ class GatewayWebSocketClient(
                     )
 
                 val type =
-                    json.get("type")
-                        ?.asString
+                    json.get(
+                        "type"
+                    )?.asString
                         ?: return@launch
 
-                if (type != "send_sms") {
+                if (
+                    type != "send_sms"
+                ) {
+
+                    Log.d(
+                        TAG,
+                        "Ignoring unsupported command: $type"
+                    )
+
                     return@launch
                 }
 
                 val requestId =
-                    json.get("request_id")
-                        ?.asString
+                    json.get(
+                        "request_id"
+                    )?.asString
 
                 val phoneNumber =
-                    json.get("phone_number")
-                        ?.asString
+                    json.get(
+                        "phone_number"
+                    )?.asString
 
                 val smsMessage =
-                    json.get("message")
-                        ?.asString
+                    json.get(
+                        "message"
+                    )?.asString
 
                 if (
                     requestId.isNullOrBlank() ||
@@ -236,11 +521,18 @@ class GatewayWebSocketClient(
                 ) {
 
                     sendResult(
-                        socket = socket,
+                        socket =
+                            socket,
+
                         requestId =
                             requestId ?: "",
-                        success = false,
-                        smsId = null,
+
+                        success =
+                            false,
+
+                        smsId =
+                            null,
+
                         error =
                             "Invalid SMS command"
                     )
@@ -253,33 +545,62 @@ class GatewayWebSocketClient(
                     "Processing SMS request: $requestId"
                 )
 
+                /*
+                 * Preserve the existing SmsManager API
+                 * which has already worked in our
+                 * end-to-end OTP test.
+                 */
                 val result =
                     smsManager.sendSms(
-                        phoneNumber = phoneNumber,
-                        message = smsMessage,
-                        requestId = requestId
+                        phoneNumber =
+                            phoneNumber,
+
+                        message =
+                            smsMessage,
+
+                        requestId =
+                            requestId
                     )
 
-                if (result.isSuccess) {
+                if (
+                    result.isSuccess
+                ) {
 
                     sendResult(
-                        socket = socket,
-                        requestId = requestId,
-                        success = true,
+                        socket =
+                            socket,
+
+                        requestId =
+                            requestId,
+
+                        success =
+                            true,
+
                         smsId =
                             result.getOrNull(),
-                        error = null
+
+                        error =
+                            null
                     )
 
                 } else {
 
                     sendResult(
-                        socket = socket,
-                        requestId = requestId,
-                        success = false,
-                        smsId = null,
+                        socket =
+                            socket,
+
+                        requestId =
+                            requestId,
+
+                        success =
+                            false,
+
+                        smsId =
+                            null,
+
                         error =
-                            result.exceptionOrNull()
+                            result
+                                .exceptionOrNull()
                                 ?.message
                                 ?: "Unable to send SMS"
                     )
@@ -296,6 +617,10 @@ class GatewayWebSocketClient(
         }
     }
 
+    // =====================================================
+    // SMS RESULT
+    // =====================================================
+
     private fun sendResult(
         socket: WebSocket,
         requestId: String,
@@ -304,71 +629,134 @@ class GatewayWebSocketClient(
         error: String?
     ) {
 
-        val response =
-            JsonObject().apply {
+        try {
 
-                addProperty(
-                    "type",
-                    "sms_result"
-                )
+            val response =
+                JsonObject().apply {
 
-                addProperty(
-                    "request_id",
-                    requestId
-                )
-
-                addProperty(
-                    "success",
-                    success
-                )
-
-                if (smsId != null) {
                     addProperty(
-                        "sms_id",
-                        smsId
+                        "type",
+                        "sms_result"
                     )
+
+                    addProperty(
+                        "request_id",
+                        requestId
+                    )
+
+                    addProperty(
+                        "success",
+                        success
+                    )
+
+                    if (
+                        smsId != null
+                    ) {
+
+                        addProperty(
+                            "sms_id",
+                            smsId
+                        )
+                    }
+
+                    if (
+                        error != null
+                    ) {
+
+                        addProperty(
+                            "error",
+                            error
+                        )
+                    }
                 }
 
-                if (error != null) {
-                    addProperty(
-                        "error",
-                        error
+            val sent =
+                socket.send(
+                    gson.toJson(
+                        response
                     )
-                }
+                )
+
+            if (
+                !sent
+            ) {
+
+                Log.w(
+                    TAG,
+                    "Unable to queue SMS result for request $requestId"
+                )
             }
 
-        socket.send(
-            gson.toJson(response)
-        )
+        } catch (e: Exception) {
+
+            Log.e(
+                TAG,
+                "Unable to send SMS result",
+                e
+            )
+        }
     }
 
+    // =====================================================
+    // AUTOMATIC RECONNECT
+    // =====================================================
+
+    @Synchronized
     private fun scheduleReconnect() {
 
         if (
-            !shouldReconnect ||
-            reconnecting
+            !shouldReconnect
         ) {
             return
         }
 
-        reconnecting = true
+        if (
+            reconnectJob?.isActive == true
+        ) {
 
-        scope.launch {
-
-            Log.i(
+            Log.d(
                 TAG,
-                "Reconnecting in 5 seconds..."
+                "Reconnect already scheduled"
             )
 
-            kotlinx.coroutines.delay(
-                RECONNECT_DELAY
-            )
-
-            reconnecting = false
-
-            if (shouldReconnect) {
-                connect()
-            }
+            return
         }
+
+        val delayForThisAttempt =
+            reconnectDelay
+
+        Log.i(
+            TAG,
+            "Reconnecting in ${delayForThisAttempt / 1000} seconds..."
+        )
+
+        reconnectJob =
+            scope.launch {
+
+                delay(
+                    delayForThisAttempt
+                )
+
+                if (
+                    !shouldReconnect
+                ) {
+                    return@launch
+                }
+
+                connecting =
+                    false
+
+                webSocket =
+                    null
+
+                connect()
+
+                reconnectDelay =
+                    (
+                        delayForThisAttempt * 2
+                    ).coerceAtMost(
+                        MAX_RECONNECT_DELAY
+                    )
+            }
     }
 }
